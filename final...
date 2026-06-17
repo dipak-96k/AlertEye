@@ -1,0 +1,279 @@
+from ultralytics import YOLO
+import cv2
+import pyttsx3
+import serial
+import pynmea2
+from gpiozero import DistanceSensor
+import time
+
+from IPython.display import display, clear_output
+import matplotlib.pyplot as plt
+
+# ==================================
+# LOAD YOLO MODEL
+# ==================================
+
+# Custom model:
+# model = YOLO("best.pt")
+
+# Default COCO model
+model = YOLO("yolo11n.pt")
+
+# ==================================
+# ULTRASONIC SENSOR
+# ==================================
+
+sensor = DistanceSensor(
+    echo=17,
+    trigger=4,
+    max_distance=4
+)
+
+# ==================================
+# GPS
+# ==================================
+
+gps = serial.Serial(
+    '/dev/serial0',
+    9600,
+    timeout=1
+)
+
+latitude = None
+longitude = None
+
+# ==================================
+# VOICE ENGINE
+# ==================================
+
+engine = pyttsx3.init()
+
+engine.setProperty('rate', 160)
+engine.setProperty('volume', 1)
+
+# ==================================
+# CAMERA
+# ==================================
+
+cap = cv2.VideoCapture(0)
+
+if not cap.isOpened():
+    print("Camera not detected")
+    raise SystemExit
+
+print("Alert Eye Started")
+
+# ==================================
+# IMPORTANT OBJECTS ONLY
+# ==================================
+
+important_objects = [
+    "person",
+    "car",
+    "bus",
+    "truck",
+    "motorcycle",
+    "bicycle",
+    "chair",
+    "dog",
+    "cat"
+]
+
+last_spoken = ""
+last_time = 0
+
+# ==================================
+# GPS FUNCTION
+# ==================================
+
+def get_gps():
+    global latitude, longitude
+
+    try:
+        line = gps.readline().decode(
+            'utf-8',
+            errors='ignore'
+        )
+
+        if line.startswith('$GPRMC'):
+
+            msg = pynmea2.parse(line)
+
+            if msg.status == 'A':
+
+                latitude = round(
+                    msg.latitude,
+                    6
+                )
+
+                longitude = round(
+                    msg.longitude,
+                    6
+                )
+
+    except:
+        pass
+
+# ==================================
+# MAIN LOOP
+# ==================================
+
+while True:
+
+    get_gps()
+
+    success, frame = cap.read()
+
+    if not success:
+        continue
+
+    frame_width = frame.shape[1]
+
+    results = model(frame)
+
+    ultrasonic_distance = round(
+        sensor.distance * 100,
+        1
+    )
+
+    for result in results:
+
+        for box in result.boxes:
+
+            conf = float(box.conf[0])
+
+            if conf < 0.60:
+                continue
+
+            cls = int(box.cls[0])
+
+            label = model.names[cls]
+
+            if label not in important_objects:
+                continue
+
+            x1, y1, x2, y2 = map(
+                int,
+                box.xyxy[0]
+            )
+
+            center_x = int((x1 + x2) / 2)
+
+            # ==================================
+            # DIRECTION
+            # ==================================
+
+            if center_x < frame_width / 3:
+                direction = "left"
+
+            elif center_x > frame_width * 2 / 3:
+                direction = "right"
+
+            else:
+                direction = "center"
+
+            # ==================================
+            # SPEECH
+            # ==================================
+
+            speech = (
+                f"{label} "
+                f"{direction} "
+                f"{int(ultrasonic_distance)} "
+                f"centimeter"
+            )
+
+            current = time.time()
+
+            if (
+                speech != last_spoken
+                and current - last_time > 3
+            ):
+
+                print("\n================")
+                print("Object:", label)
+                print("Direction:", direction)
+                print("Distance:", ultrasonic_distance)
+
+                if latitude and longitude:
+                    print(
+                        "GPS:",
+                        latitude,
+                        longitude
+                    )
+
+                print("================\n")
+
+                try:
+                    engine.say(speech)
+                    engine.runAndWait()
+                except:
+                    pass
+
+                last_spoken = speech
+                last_time = current
+
+            # ==================================
+            # DRAW BOX
+            # ==================================
+
+            cv2.rectangle(
+                frame,
+                (x1, y1),
+                (x2, y2),
+                (0, 255, 0),
+                2
+            )
+
+            cv2.putText(
+                frame,
+                f"{label} {conf:.2f}",
+                (x1, y1 - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0,255,0),
+                2
+            )
+
+    # ==================================
+    # GPS DISPLAY
+    # ==================================
+
+    if latitude and longitude:
+
+        cv2.putText(
+            frame,
+            f"GPS: {latitude},{longitude}",
+            (10,30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255,0,0),
+            2
+        )
+
+    # ==================================
+    # JUPYTER DISPLAY
+    # ==================================
+
+    rgb = cv2.cvtColor(
+        frame,
+        cv2.COLOR_BGR2RGB
+    )
+
+    clear_output(wait=True)
+
+    plt.figure(figsize=(10,6))
+    plt.imshow(rgb)
+    plt.axis("off")
+
+    display(plt.gcf())
+    plt.close()
+
+    time.sleep(0.05)
+
+# ==================================
+# CLEANUP
+# ==================================
+
+cap.release()
+gps.close()
