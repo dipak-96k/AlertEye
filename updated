@@ -1,0 +1,263 @@
+```python
+import cv2
+import time
+import pyttsx3
+import RPi.GPIO as GPIO
+from ultralytics import YOLO
+
+from IPython.display import display, clear_output
+import matplotlib.pyplot as plt
+
+# ==================================
+# TEXT TO SPEECH
+# ==================================
+
+engine = pyttsx3.init()
+engine.setProperty('rate', 150)
+
+def speak(text):
+    print(text)
+    try:
+        engine.say(text)
+        engine.runAndWait()
+    except:
+        pass
+
+# ==================================
+# ULTRASONIC SENSOR
+# ==================================
+
+TRIG = 4
+ECHO = 17
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(TRIG, GPIO.OUT)
+GPIO.setup(ECHO, GPIO.IN)
+
+def get_distance():
+
+    GPIO.output(TRIG, False)
+    time.sleep(0.05)
+
+    GPIO.output(TRIG, True)
+    time.sleep(0.00001)
+    GPIO.output(TRIG, False)
+
+    pulse_start = time.time()
+    timeout = pulse_start + 0.1
+
+    while GPIO.input(ECHO) == 0:
+        pulse_start = time.time()
+        if pulse_start > timeout:
+            return -1
+
+    pulse_end = time.time()
+
+    while GPIO.input(ECHO) == 1:
+        pulse_end = time.time()
+        if pulse_end > timeout:
+            return -1
+
+    duration = pulse_end - pulse_start
+    distance = duration * 17150
+
+    return round(distance, 2)
+
+# ==================================
+# LOAD YOLO MODEL
+# ==================================
+
+model = YOLO("yolov8n.pt")
+
+# ==================================
+# CAMERA
+# ==================================
+
+cap = cv2.VideoCapture(0)
+
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+if not cap.isOpened():
+    print("Camera not detected!")
+    raise SystemExit
+
+speak("Alert Eye started")
+
+last_spoken = ""
+last_speech_time = time.time()
+
+# ==================================
+# MAIN LOOP
+# ==================================
+
+try:
+
+    while True:
+
+        ret, frame = cap.read()
+
+        if not ret:
+            continue
+
+        frame = cv2.resize(frame, (640, 480))
+
+        start_time = time.time()
+
+        results = model(
+            frame,
+            imgsz=320,
+            verbose=False
+        )
+
+        fps = 1 / (time.time() - start_time)
+
+        frame_width = frame.shape[1]
+
+        detected_list = []
+
+        for result in results:
+
+            for box in result.boxes:
+
+                confidence = float(box.conf[0])
+
+                if confidence < 0.60:
+                    continue
+
+                cls = int(box.cls[0])
+
+                obj_name = model.names[cls]
+
+                x1, y1, x2, y2 = map(
+                    int,
+                    box.xyxy[0]
+                )
+
+                center_x = (x1 + x2) // 2
+
+                # ======================
+                # DIRECTION
+                # ======================
+
+                if center_x < frame_width * 0.33:
+                    direction = "left"
+
+                elif center_x > frame_width * 0.66:
+                    direction = "right"
+
+                else:
+                    direction = "center"
+
+                # ======================
+                # DISTANCE
+                # ======================
+
+                distance = get_distance()
+
+                detected_list.append(
+                    (
+                        obj_name,
+                        direction,
+                        distance
+                    )
+                )
+
+                # ======================
+                # DRAW BOX
+                # ======================
+
+                cv2.rectangle(
+                    frame,
+                    (x1, y1),
+                    (x2, y2),
+                    (0, 255, 0),
+                    2
+                )
+
+                cv2.putText(
+                    frame,
+                    f"{obj_name} {confidence:.2f}",
+                    (x1, y1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 255, 0),
+                    2
+                )
+
+        # ==========================
+        # VOICE ALERT
+        # ==========================
+
+        current_time = time.time()
+
+        if detected_list and (current_time - last_speech_time > 3):
+
+            obj, direction, distance = detected_list[0]
+
+            if distance > 0:
+
+                speech = (
+                    f"{obj} ahead on "
+                    f"{direction} side "
+                    f"distance "
+                    f"{int(distance)} centimeters"
+                )
+
+            else:
+
+                speech = (
+                    f"{obj} ahead on "
+                    f"{direction} side"
+                )
+
+            if speech != last_spoken:
+
+                speak(speech)
+
+                last_spoken = speech
+                last_speech_time = current_time
+
+        # ==========================
+        # FPS DISPLAY
+        # ==========================
+
+        cv2.putText(
+            frame,
+            f"FPS: {fps:.1f}",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 255),
+            2
+        )
+
+        # ==========================
+        # DISPLAY IN JUPYTER
+        # ==========================
+
+        rgb = cv2.cvtColor(
+            frame,
+            cv2.COLOR_BGR2RGB
+        )
+
+        clear_output(wait=True)
+
+        plt.figure(figsize=(10, 6))
+        plt.imshow(rgb)
+        plt.axis("off")
+
+        display(plt.gcf())
+        plt.close()
+
+except KeyboardInterrupt:
+
+    print("Stopped")
+
+finally:
+
+    cap.release()
+    GPIO.cleanup()
+
+    speak("Alert Eye stopped")
+```
